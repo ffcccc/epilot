@@ -1,4 +1,4 @@
-# cudaepi
+# cudaepi (-->epilot)
 
 Development of statistical methods for detecting epistasis in genetic datasets,
 using C++ and, where useful, CUDA acceleration.
