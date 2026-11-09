@@ -4,29 +4,32 @@ Development of statistical methods for detecting epistasis in genetic datasets,
 using C++ and, where useful, CUDA acceleration.
 
 The starting point is a legacy CUDA prototype for pairwise SNP screening in
-binary case/control data. It is a research baseline, not a validated analysis
-pipeline. Known correctness issues below must be resolved before interpreting
-its output scientifically. No CPU-only executable, automated tests, example
-dataset, or modern portable build configuration is currently included.
+binary case/control data. The repository now includes a Windows x64 Makefile
+build and a PLINK BED/BIM/FAM input adapter, but remains a research baseline,
+not a validated analysis pipeline. Known correctness issues below must be
+resolved before interpreting its output scientifically. No CPU-only executable,
+automated tests, or sample dataset is included.
 
 ## Repository Layout
 
 | File | Role |
 | --- | --- |
-| [epi.cu](epi.cu) | GPU contingency tables, screening statistics, pair scanning, and CUDA lifecycle |
-| [epi.h](epi.h) | Thresholds, result structures, genotype type, and host-facing CUDA declarations |
-| [main.cpp](main.cpp) | HDF5 input, chunking, GPU orchestration, and tab-separated output; also inactive CPU comparison code |
-| [common.h](common.h) | Placeholder header |
-| [cudaepi.vcproj](cudaepi.vcproj) | Legacy Visual Studio 2008 Win32 project |
-| [cuPrintf.cu](cuPrintf.cu), [cuPrintf.cuh](cuPrintf.cuh) | Bundled device-printing helper, not used by the active scan |
+| [src/epi.cu](src/epi.cu) | GPU contingency tables, screening statistics, pair scanning, and CUDA lifecycle |
+| [include/epi.h](include/epi.h) | Thresholds, result structures, genotype type, and host-facing CUDA declarations |
+| [src/main.cpp](src/main.cpp) | BED dataset loading, chunking, GPU orchestration, and tab-separated output |
+| [include/bed_dataset.h](include/bed_dataset.h) | PLINK BED/BIM/FAM adapter and single-SNP score calculation |
+| [include/cutil_compat.h](include/cutil_compat.h) | Minimal replacements for the removed CUDA CUTIL helpers |
+| [Makefile](Makefile), [deps.yaml](deps.yaml) | Windows x64 build targets and the Rust BED-reader bridge dependency |
+| [src/cuPrintf.cu](src/cuPrintf.cu), [src/cuPrintf.cuh](src/cuPrintf.cuh) | Bundled device-printing helper, not used by the active scan |
 
-`Debug/` and `Release/` contain historical build artifacts, not a reproducible
-build or evidence that the current source passes tests.
+The Makefile builds `epi.exe` or `build/debug/epi.exe`; existing binaries and
+PDBs are build artifacts, not evidence that the current source passes tests.
 
 ## Current Method
 
-1. Read genotypes, binary phenotypes, SNP metadata, and precomputed single-SNP
-   scores through the external `hdfTPED` reader.
+1. Read genotypes from a PLINK `.bed` file and SNP/sample metadata from matching
+  `.bim` and `.fam` files. Single-SNP comparison scores are computed by the
+  `BedDataset` adapter rather than loaded from an external reader.
 2. Partition the SNP matrix using a hard-coded 500,000,000-byte genotype-memory
    budget. Scan within chunks and between pairs of chunks.
 3. Assign one CUDA thread to each scheduled SNP pair. Build a `2 x 3 x 3`
@@ -62,7 +65,8 @@ cells against the double heterozygote. `VecAdd` is unrelated example code.
 
 The cell test detects joint-genotype association with phenotype. Comparing its
 statistic with single-SNP scores does not establish interaction beyond main
-effects, and the external scores' definition is not available in this repository.
+effects; the adapter computes each single-SNP score as the maximum genotype-cell
+chi-square statistic.
 A formal interaction model, null hypothesis, calibration, and validation are
 still needed before claiming detection of epistasis.
 
@@ -78,56 +82,55 @@ other covariates are not modeled.
 - Genotypes are stored SNP-major: `M[snp * nSamples + sample]`.
 - Valid genotype codes are `0`, `1`, and `2`; negative values indicate missing
   genotypes. Allele orientation must be consistent with the dataset reader.
-- Phenotypes must be exactly `0` (control) or `1` (case). The kernel directly
-  uses them as array indices and does not handle missing phenotypes safely.
+- The adapter maps PLINK FAM phenotype `1` to `0` (control) and `2` to `1`
+  (case). Other phenotype values become missing, which the kernel does not
+  handle safely; use datasets containing only `1` and `2` phenotypes.
 - `TF` is plain `char`; missing-value handling requires signed-char behavior
-  and compatibility with the reader's external `T_GType` definition.
-- Each SNP must have a supplied univariate score on a scale appropriate for
-  the comparison performed by the kernel.
+  so BED missing genotypes remain negative in the kernel.
+- The adapter computes each SNP's univariate score from its genotype counts.
 
-The input is an HDF5 file in the external `hugedatafile` reader's format, not a
-generic HDF5 schema or a direct VCF/PLINK input. The reader and its schema are
-not included, so dataset conversion and schema details cannot yet be specified
-from this repository alone.
+Pass the PLINK `.bed` path; matching same-basename `.bim` and `.fam` files must
+be in the same directory. Genotypes are read by the Rust-backed
+`bed-reader-cpp` bridge.
 
 ## Build Status
 
-The checked-in project targets Visual Studio 2008, Win32, CUDA Toolkit/SDK 3.2,
-and CUDA compute capability 2.0. It depends on:
+The current Makefile targets Windows x64 with GNU Make, MSVC C++ Build Tools,
+and CUDA Toolkit 12.x (`nvcc` and the CUDA runtime). It uses C++17 and defaults
+`CUDA_ARCH` to `native`, compiling for the GPU architecture detected by NVCC.
+`CUDA_PATH` must point to the selected Toolkit installation for linking.
+The old CUTIL dependency has been replaced by `include/cutil_compat.h`. The
+Makefile fetches the Rust-backed `bed-reader-cpp` 0.1.0 release declared in
+`deps.yaml`; Python 3.12+ and PyYAML are used by the dependency fetcher.
 
-- NVIDIA CUDA runtime and the old GPU Computing SDK helpers, including
-  `cutil_inline.h` (not provided by current CUDA toolkits).
-- HDF5 C and C++ libraries, with configuration-specific DLL import libraries.
-- External `hugedatafile` headers and sources referenced from a sibling project.
+From the project directory, set up the dependency fetcher and build the
+executable:
 
-The project also contains machine-specific include paths, environment variables
-such as `MYWORKSPACE`, `CUDA_INC_PATH`, `CUDA_LIB_PATH32`, and
-`NVSDKCOMPUTE_ROOT`, and a post-build copy to an external directory. Review
-these before attempting a legacy build. Some additional historical include
-paths are listed in the project; their necessity cannot be verified without
-the external reader sources.
-
-To reproduce the historical build, restore compatible external dependencies,
-correct the paths and post-build event, then build `Debug|Win32` or
-`Release|Win32` in the matching Visual Studio/CUDA environment. A current CUDA
-installation alone is insufficient. A modern build will require replacing
-obsolete SDK helpers and updating the project and GPU target; no working modern
-build command is claimed here.
-
-## Legacy Invocation And Output
-
-With a working legacy executable and a compatible input file:
-
-```powershell
-.\cudaepi.exe "C:\data\study.h5"
+```text
+make setup
+make doctor
+make
 ```
 
-The program appends tab-separated results to `<input filename>.cc.log` and
-normally waits for Enter before exiting. Headers are repeated for each tile,
-and `EdgeName` numbering restarts for each tile. Running with no input currently
-processes no datasets. Although `--noprompt` is recognized, adding it to a file
-argument makes `argc == 3`, which bypasses dataset processing; do not use that
-combination until argument handling is corrected.
+`make` fetches dependencies and builds `epi.exe`. To build the debug executable,
+run `make debug` after dependencies are available; it writes
+`build/debug/epi.exe`. Set `CUDA_ARCH` on the Make command line to override the
+default architecture, for example `make CUDA_ARCH=sm_XX`. This Makefile does not
+provide a Linux, cross-platform, or CPU-only build.
+
+## Invocation And Output
+
+With the required build tools installed and a PLINK dataset available:
+
+```powershell
+.\epi.exe --files "C:\data\study.bed" --noprompt
+```
+
+`--files` accepts one or more BED paths. Each BED file must have matching BIM
+and FAM siblings. The program appends tab-separated results to
+`<input filename>.cc.log`; it waits for Enter before exiting unless
+`--noprompt` is supplied. Headers are repeated for each tile, and `EdgeName`
+numbering restarts for each tile.
 
 | Output | Meaning |
 | --- | --- |
