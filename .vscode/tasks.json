@@ -1,0 +1,16 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "epilot: build debug",
+            "type": "process",
+            "command": "make",
+            "args": ["debug"],
+            "options": {
+                "cwd": "${workspaceFolder:epilot}"
+            },
+            "problemMatcher": "$msCompile",
+            "group": "build"
+        }
+    ]
+}

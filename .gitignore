@@ -43,6 +43,13 @@ build/
 Build/
 build-*/
 
+# Third party binaries and libs
+/3rdparty/
+
+# Local Python environment
+/.venv/
+__pycache__/
+
 # CMake generated files
 CMakeFiles/
 CMakeCache.txt

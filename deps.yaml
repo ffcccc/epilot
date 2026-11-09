@@ -1,0 +1,17 @@
+dependencies:
+  # Demo entries: replace URLs/checksums with your real GitHub Release assets.
+  # foo:
+  #   version: "1.2.3"
+  #   platforms:
+  #     linux-x86_64:
+  #       url: "https://github.com/example/foo/releases/download/v1.2.3/foo-1.2.3-linux-x86_64.tar.gz"
+  #       sha256: "REPLACE_WITH_SHA256"
+  #     windows-x86_64:
+  #       url: "https://github.com/example/foo/releases/download/v1.2.3/foo-1.2.3-windows-x86_64.zip"
+  #       sha256: "REPLACE_WITH_SHA256"
+  bed-reader-cpp:
+    version: "0.1.0"
+    platforms:
+      windows-x86_64:
+        url: "https://github.com/ffcccc/epiload/releases/download/v0.1.0/bed-reader-cpp_x86_64-pc-windows-msvc.zip"
+        sha256: "31ef785f524621e73ce726a1f1852f66fec9024b75772d330d7c78514575dc8d"
