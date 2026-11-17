@@ -9,7 +9,24 @@
             "type": "cppvsdbg",
             "request": "launch",
             "program": "${workspaceFolder:epilot}/build/debug/epi.exe",
-            "args": ["--files", "${input:bedFile}", "--noprompt"],
+            "args": ["--files", "${input:bedFile}", "--methods", "${input:method}", "--device", "gpu", "--noprompt"],
+            "cwd": "${workspaceFolder:epilot}",
+            "stopAtEntry": false,
+            "console": "integratedTerminal",
+            "preLaunchTask": "epilot: build debug",
+            "environment": [
+                {
+                    "name": "PATH",
+                    "value": "${env:CUDA_PATH}/bin;${env:PATH}"
+                }
+            ]
+        },
+        {
+            "name": "Debug epitest.exe (Host C++)",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder:epilot}/build/debug/epitest.exe",
+            "args": [],
             "cwd": "${workspaceFolder:epilot}",
             "stopAtEntry": false,
             "console": "integratedTerminal",
@@ -27,7 +44,13 @@
             "id": "bedFile",
             "type": "promptString",
             "description": "PLINK .bed path (with matching .bim and .fam files)",
-            "default": "${workspaceFolder:epiload}/data/bed-sample-files/all.bed"
+            "default": "${workspaceFolder:epilot}/data/testepi.bed"
+        },
+        {
+            "id": "method",
+            "type": "promptString",
+            "description": "Methods: fast (fastepistasis+Chi2), chi2, fastepistasis, fastepistasis+Chi2",
+            "default": "fastepistasis"
         }
     ]
 }
