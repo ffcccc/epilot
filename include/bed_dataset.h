@@ -9,11 +9,13 @@
 #include <vector>
 
 #include "3rdparty/bed-reader-cpp/0.1.0/include/bed_reader_bridge.h"
-#include "include/common.h"
+#include "include/epi_core.h"
+
+using namespace epi;
 
 // PLINK .bed/.bim/.fam dataset exposing the subset of the hdfTPED interface used by main.cpp.
 // Genotypes come from BedWrapper; SNP and sample metadata are parsed from the .bim/.fam siblings.
-class BedDataset {
+class BedDataset : public epi::SnpSource {
 public:
 	explicit BedDataset(const std::string &bedPath) : m_filename(bedPath) {
 		const std::string base = stripExtension(bedPath);
@@ -40,19 +42,40 @@ public:
 	}
 
 	std::string filename() const { return m_filename; }
-	unsigned numSnps() const { return m_nSnps; }
-	unsigned numSamples() const { return m_nSamples; }
+	size_t numSnps() const override { return m_nSnps; }
+	size_t numSamples() const override { return m_nSamples; }
 
 	void getSNPChr(const unsigned snpInd, std::string &chr) const { chr = m_snpChr.at(snpInd); }
 	void getSNPName(const unsigned snpInd, std::string &name) const { name = m_snpName.at(snpInd); }
 	void getSNPScore(const unsigned snpInd, float &score) const { score = m_snpScore.at(snpInd); }
+	std::string chromosome(const size_t snpInd) const override { return m_snpChr.at(snpInd); }
+	float score(const size_t snpInd) const override { return m_snpScore.at(snpInd); }
 
 	// 1 = affected, 0 = unaffected, -1 = missing (PLINK: 2 = case, 1 = control).
-	void getSamplePheno(const unsigned sampInd, int &phe) const { phe = m_pheno.at(sampInd); }
+	void phenotype(const size_t sampInd, int &phe) const { phe = m_pheno.at(sampInd); }
+	int phenotype(const size_t s) const override { return m_pheno.at(s); }
 
-	void getSnpMem(const unsigned snpInd, T_GType *val) const {
-		const T_GType *src = &m_geno.at(static_cast<size_t>(snpInd) * m_nSamples);
-		std::copy(src, src + m_nSamples, val);
+	void getSnpMem(const size_t snpInd, T_GType *out) const {
+		const T_GType *src = &m_geno.at(snpInd * m_nSamples);
+		std::copy(src, src + m_nSamples, out);
+	}
+
+	int8_t genotype(const size_t snpInd, size_t sampleInd) const override {
+		int8_t out = -1;
+		const T_GType* src = &m_geno.at(snpInd * m_nSamples);
+		if (src[sampleInd] != static_cast<T_GType>(-1)){
+		    out = static_cast<int8_t>(src[sampleInd]);
+		}
+		return out;
+	}
+
+	void genotypes(const size_t snpInd, int8_t* out) const override {
+		const T_GType* src = &m_geno.at(snpInd * m_nSamples);
+		for (size_t sample = 0; sample < m_nSamples; ++sample) {
+			out[sample] = src[sample] == static_cast<T_GType>(-1)
+			    ? static_cast<int8_t>(-1)
+			    : static_cast<int8_t>(src[sample]);
+		}
 	}
 
 private:

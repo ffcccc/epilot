@@ -1,0 +1,3 @@
+ CHR  SNP        N_SIG        N_TOT         PROP   BEST_CHISQ BEST_CHR BEST_SNP 
+   1 snp1            1            1            1        2.911    1 snp2 
+   1 snp2            1            1            1        2.911    1 snp1 
