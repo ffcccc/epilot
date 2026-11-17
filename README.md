@@ -10,13 +10,26 @@ not a validated analysis pipeline. Known correctness issues below must be
 resolved before interpreting its output scientifically. No CPU-only executable,
 automated tests, or sample dataset is included.
 
+## Recent Updates
+
+- **Refactored statistical methods** (Nov 2026): Epistatic tests extracted into
+  `include/epi_stats.h` as struct-based functors enabling compile-time test
+  selection. New `FastEpistasis2` screening statistic with improved variance
+  estimation. `FastThenChi2` pipeline for two-stage filtering.
+- **Data tile scanner design**: Memory-efficient partitioning strategy with
+  deterministic GPU memory usage, enabling processing of large datasets. Tiles
+  are processed sequentially with output headers repeated per tile.
+- **Makefile build stability** (Nov 2026): Fixed header dependency tracking to
+  include `epi_stats.h` in compilation triggers, resolving stale object issues.
+
 ## Repository Layout
 
 | File | Role |
 | --- | --- |
+| [include/epi_stats.h](include/epi_stats.h) | Epistatic test suite: `FastEpistasis`, `FastEpistasis2`, `Chi2Absolute`, and `FastThenChi2` pipeline; host-only test dispatcher `with_test()` |
 | [src/epi.cu](src/epi.cu) | GPU contingency tables, screening statistics, pair scanning, and CUDA lifecycle |
 | [include/epi.h](include/epi.h) | Thresholds, result structures, genotype type, and host-facing CUDA declarations |
-| [src/main.cpp](src/main.cpp) | BED dataset loading, chunking, GPU orchestration, and tab-separated output |
+| [src/main.cpp](src/main.cpp) | BED dataset loading, data tile scheduling, GPU orchestration, and tab-separated output |
 | [include/bed_dataset.h](include/bed_dataset.h) | PLINK BED/BIM/FAM adapter and single-SNP score calculation |
 | [include/cutil_compat.h](include/cutil_compat.h) | Minimal replacements for the removed CUDA CUTIL helpers |
 | [Makefile](Makefile), [deps.yaml](deps.yaml) | Windows x64 build targets and the Rust BED-reader bridge dependency |
@@ -27,20 +40,73 @@ PDBs are build artifacts, not evidence that the current source passes tests.
 
 ## Current Method
 
+### Data Tile Scanner Design
+
+The dataset is partitioned into memory-efficient **tiles** using a hard-coded
+500,000,000-byte genotype-memory budget. This tile-based architecture enables:
+- **Within-tile scanning**: Complete SNP-pair enumeration within each tile
+- **Between-tile scanning**: Exhaustive cross-tile pair coverage (all pairs from
+  chunk *i* × chunk *j* where i ≤ j)
+- **Deterministic memory management**: Predictable GPU memory usage regardless
+  of dataset size, allowing processing of very large genetic cohorts
+
+For each tile, one CUDA thread is assigned per SNP pair. The scheduler computes
+grid and block dimensions to cover the tile-local pair matrix. Tiles are
+processed sequentially; output from each tile (tagged with tile-local `EdgeName`)
+is appended to the results file with repeated headers.
+
+### Epistatic Test Suite
+
+The refactored statistical methods are defined in `include/epi_stats.h` as
+struct-based functors, each implementing:
+
+```cpp
+static EPI_HD TestOut run(const real CT[2][3][3], const real N[3], 
+                          const TestOptions&);
+```
+
+This design enables:
+- **Compile-time polymorphism**: Tests are instantiated per back end (host/device)
+- **Code reuse**: Same implementation runs on CPU and GPU via `EPI_HD` macro
+- **Easy extensibility**: New tests are added by writing a struct and one line
+  to the dispatcher
+
+#### Available Tests
+
+- **`FastEpistasis`**: Allele-pair log-odds-ratio z score (Purcell 2007 / BOOST
+  style). Collapses the 3×3 genotype table to 2×2 allele-pair counts, then
+  returns `|log OR_aff - log OR_unaff| / SE`. Returns 0 if any of the 8
+  allele-count cells is empty.
+
+- **`FastEpistasis2`**: Refined screening statistic using allele-pair
+  stratification with separate variance estimation per phenotype group.
+  Computes independent odds ratios and variances for cases and controls,
+  then returns `|log OR_case - log OR_control| / sqrt(var_case + var_control)`.
+  More robust to unbalanced allele distributions.
+
+- **`Chi2Absolute`**: Pearson chi-square test for each joint-genotype cell
+  against all remaining cells (2×2: cell vs. rest, cases vs. controls).
+  Reports the cell with the largest chi-square; ties keep the first cell in
+  row-major order. Only cells with nonzero counts in both phenotype groups
+  are evaluated.
+
+- **`FastThenChi2`**: Two-stage pipeline using `FastEpistasis2` as a screen
+  (default: `|z| ≥ 0.01`), then running `Chi2Absolute` on pairs that pass.
+  Reduces computational load by pre-filtering weak candidates.
+
+The active test is selected at compile time via the `with_test()` dispatcher.
+
 1. Read genotypes from a PLINK `.bed` file and SNP/sample metadata from matching
   `.bim` and `.fam` files. Single-SNP comparison scores are computed by the
   `BedDataset` adapter rather than loaded from an external reader.
 2. Partition the SNP matrix using a hard-coded 500,000,000-byte genotype-memory
-   budget. Scan within chunks and between pairs of chunks.
+   budget. Scan within tiles and between pairs of tiles.
 3. Assign one CUDA thread to each scheduled SNP pair. Build a `2 x 3 x 3`
    contingency table indexed by phenotype and the two genotype codes. Exclude
    samples missing either genotype and adjust case/control totals for that pair.
-4. Compute a fast-epi-style screening statistic comparing allele-product odds
-   ratios in cases and controls. The intended absolute standardized contrast is
-   the difference in log odds ratios divided by the square root of the sum of
-   reciprocal allele-product counts. These are weighted genotype counts, not
-   inferred phased haplotypes. The current implementation returns zero because
-   of variable shadowing; the p-value conversion is commented out.
+4. Compute the selected screening statistic (by default `FastEpistasis2`), 
+   comparing phenotype-stratified odds ratios or other measures across cases 
+   and controls.
 5. For pairs passing the screen, test each of the nine joint-genotype cells
    against all other joint genotypes in a case/control 2x2 table. With `A` and
    `B` the case/control counts in the selected cell and `C` and `D` the remaining
@@ -57,9 +123,6 @@ PDBs are build artifacts, not evidence that the current source passes tests.
 6. Retain a pair if a cell exceeds `CHI10E9` (currently 25) and the retained
    statistic exceeds both supplied single-SNP scores. The current code keeps
    the last qualifying cell in traversal order, not the strongest cell.
-
-The active path uses `ctEpiAbs`; `ctEpiRel` is an unused alternative comparing
-cells against the double heterozygote. `VecAdd` is unrelated example code.
 
 ### Statistical Interpretation
 
