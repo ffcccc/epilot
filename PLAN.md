@@ -32,8 +32,8 @@ Source: code review of `f038f33`, build of the test program, and an experiment o
 | ---- | --- | --- | --- |
 | F-01 | High | Default scan reports noise. `main.cpp` uses `ScanConfig` with `min_stat = 0` and exposes no option; the old `CHI10E9 = 25` cutoff is unused. Verified: on phenotype-permuted data (1,500 SNPs, 1.12 M pairs, `Chi2`) 65.5 % of pairs are reported at `min_stat = 0`, 1 at `min_stat = 25`. | [ ] |
 | F-02 | High | `Chi2Absolute` is a joint-genotype *association* test (cell vs rest), not an interaction test. The "beats both single-SNP scores" filter compares a maximum over 9 cells with a maximum over 3 and is not calibrated. No p-value, no df, no multiple-testing control. | [ ] |
-| F-03 | High | z vs z² mismatch. `FastEpistasis` returns z² (`out.stat = z*z`); its doc comment, the test and the README describe \|z\|. Verified: all 200 `FastEpistasis` checks in `test_statistics()` fail with got = want². | [ ] |
-| F-04 | Med | `screen_min` semantics: default `3.0` in `ScanConfig`, `0.01` in old docs, `EpiScreeningTH`/`P_Epi` macros unused. Compared against z² of `FastEpistasis2`. | [ ] |
+| F-03 | High | z vs z² mismatch. `FastEpistasis` returns z² (`out.stat = z*z`); its doc comment, the test and the README described \|z\|. Resolved by D-07: z² is kept (PLINK 1.07 compatible); docs and tests corrected. | [x] |
+| F-04 | Med | `screen_min` semantics: default `3.0` in `ScanConfig`, `0.01` in old docs, `EpiScreeningTH`/`P_Epi` macros unused. Compared against z² of `FastEpistasis2`. The PLINK threshold is a p-value on z (--epi1). To get parity, screen_min could be expressed as a p-value and converted internally, which would remove the ambiguity. | [ ] |
 | F-05 | Med | `FastEpistasis2` is unreachable by name (`with_test` maps `fastepistasis` to `FastEpistasis`) and has no unit test. Two different allele-pair constructions exist without a documented rationale. | [ ] |
 | F-06 | Med | Screening then testing the same data (`FastThenChi2`) invalidates stage-2 p-values unless the screen is independent of, or accounted for in, the second test. | [ ] |
 | F-07 | Med | Single-SNP score (max genotype-vs-rest χ², float, in `BedDataset`) is a different statistic from the pair statistics it is compared with (z², cell χ²). | [ ] |
@@ -74,6 +74,7 @@ Source: code review of `f038f33`, build of the test program, and an experiment o
 | D-04 | Interaction p-values are only claimed for tests with a stated null hypothesis and calibration evidence from simulations. Other outputs are labelled "screening score". | Avoids the current ambiguity (F-02). |
 | D-05 | Every new method ships with: a written specification here, a unit test against an independent reference, a null-calibration run, and a benchmark entry. | Prevents repeating F-03. |
 | D-06 | Open question: keep the Windows Makefile and add CMake, or replace with CMake. | Linux CI and CPU-only builds need CMake; decide in M0. |
+| D-07 | Fast statistics report z² (χ², 1 df), p-value computed from z. Keep. | PLINK 1.07 `--fast-epistasis` reports z² (`CHISQ`/`STAT`) and p = 2Φ(−\|z\|) (`epi.cpp`); keeps results comparable and fits D-03. |
 
 ## 3. Milestones
 
@@ -82,7 +83,7 @@ Source: code review of `f038f33`, build of the test program, and an experiment o
 Acceptance: a clean clone builds and passes tests on Windows **and** Linux (CPU
 build without CUDA), and default output is no longer flooded with noise.
 
-- [ ] Fix F-03: choose one convention (see D-03), update `FastEpistasis`, its doc
+- [x] Fix F-03: choose one convention (see D-03), update `FastEpistasis`, its doc
       comment, the test, and the README together.
 - [ ] Fix F-04/F-05: one documented meaning of `screen_min`; expose
       `FastEpistasis2` by name (`fastepistasis2`); add its unit test against an

@@ -15,9 +15,10 @@
 #include <string>
 namespace epi {
 
-// Allele-pair log-odds-ratio z score (fast screen, after Purcell 2007 / BOOST).
-// Collapses each group's 3x3 table to a 2x2 allele-pair table (A,B,C,D), then returns
-// |log OR_aff - log OR_unaff| / SE. Returns 0 if any of the 8 cells is empty.
+/// Fast-epistasis statistic (PLINK 1.07 --fast-epistasis compatible).
+// z = |log OR_case - log OR_ctrl| / sqrt(v_case + v_ctrl)
+// Returns out.stat = z*z  (chi-square, 1 df). Two-sided p = 2*Phi(-|z|).
+// Returns stat = 0 if any allele-pair cell is empty (PLINK drops such pairs).
 struct FastEpistasis {
     static EPI_HD TestOut run(const real CT[2][3][3], const real N[3], const TestOptions&) {
         (void)N;

@@ -145,12 +145,18 @@ genotypes known.
 
 - **`FastEpistasis`** — collapses each group's 3×3 table to a 2×2 allele-pair
   table (cells `Σ n·(2−a)(2−b)`, `Σ n·(2−a)·b`, `Σ n·a·(2−b)`, `Σ n·a·b`),
-  then `z = |log OR_case − log OR_control| / sqrt(Σ 1/cell)`. The reported
-  statistic is **z²**. Returns 0 if any of the 8 cells is empty.
+  then `z = |log OR_case − log OR_control| / sqrt(Σ 1/cell)`. Returns 0 if any of the 8 cells is empty.
 - **`FastEpistasis2`** — same idea with the allele-pair cells built as
   `4·n00 + 2·n01 + 2·n10 + n11` (and analogues), and separate variances for
-  cases and controls. Reported statistic is **z²**. It is used inside
+  cases and controls. It is used inside
   `FastThenChi2` but cannot yet be selected on its own.
+- **Statistic scale (fast statistics).** `FastEpistasis` and `FastEpistasis2`
+compute the normally distributed statistic `z = |log OR_case − log OR_control| / sqrt(v_case + v_control)` and
+report **z²**, which is χ² with 1 df. This is deliberate: it matches
+`--fast-epistasis` in PLINK 1.07 (`CHISQ`/`STAT` columns), so results can be
+compared with PLINK output directly. A two-sided p-value is `2·Φ(−|z|)`
+(= P(χ²₁ ≥ z²)); epilot does not output it yet (PLAN.md, M1). Thresholds such
+as `screen_min` are compared against z², not |z|.
 - **`Chi2Absolute`** — Pearson χ² (1 df, no continuity correction) of each of
   the nine joint-genotype cells against all other cells, cases vs controls. Only
   cells with all four counts positive are tested. Reports the cell with the
@@ -195,11 +201,9 @@ repository root. It covers:
 - error handling (unknown test, invalid genotype, tile over budget, GPU overflow,
   `GS` not a multiple of the block side).
 
-Known test state at `f038f33` (checked with a CPU emulation of the CUDA calls):
-the scan, GPU-vs-CPU and error-handling tests pass; **all `FastEpistasis`
-statistic checks fail** because the test expects |z| while the function returns
-z² (see [PLAN.md](PLAN.md), F-03). There is no continuous integration and no
-test has been calibrated against a null distribution yet.
+Known test state: the `FastEpistasis` statistic checks compare against z²
+(the convention above). There is no continuous integration yet and no test has
+been calibrated against a null distribution.
 
 ## Known limitations
 
@@ -215,9 +219,9 @@ identifiers is in [PLAN.md](PLAN.md).
    "beats both single-SNP scores" rule is a heuristic, not a hypothesis test. The
    maximum over nine cells is compared with a maximum over three, with no
    p-values, no degrees-of-freedom accounting, and no multiple-testing control.
-3. **Statistic semantics are inconsistent.** Fast statistics are z², the
-   `screen_min` default is 3.0 in code, and different documents have called it a
-   z score, a p-value, or a χ² threshold.
+3. **`screen_min` semantics are unsettled.** The default is 3.0 in code and is
+   compared against z² of `FastEpistasis2`; older notes called it a z score, a
+   p-value or a χ² threshold (PLAN.md, F-04).
 4. **Allele-based fast statistics may be mis-calibrated.** They follow the PLINK
    fast-epistasis approach, whose formulas were reported to contain minor
    errors by Ueki & Cordell (2012).

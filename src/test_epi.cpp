@@ -109,7 +109,8 @@ double reference_fast_z(const std::vector<int>& g1, const std::vector<int>& g2,
         lor[g] = std::log((A * D) / (B * C));
         var += 1 / A + 1 / B + 1 / C + 1 / D;
     }
-    return std::fabs(lor[AFF] - lor[UNAFF]) / std::sqrt(var);
+    double z = std::fabs(lor[AFF] - lor[UNAFF]) / std::sqrt(var);
+    return z*z;
 }
 
 const char* kTestNames[] = {"fastepistasis", "Chi2", "fastepistasis+Chi2"};
