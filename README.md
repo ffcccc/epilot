@@ -1,276 +1,256 @@
-# cudaepi (-->epilot)
+# epilot
 
-Development of statistical methods for detecting epistasis in genetic datasets,
-using C++ and, where useful, CUDA acceleration.
+C++17 / CUDA tool for **exhaustive pairwise SNP screening** in binary (case/control)
+genetic data, built to investigate statistical epistasis. It reads PLINK
+`.bed/.bim/.fam` files, builds the 2×3×3 genotype contingency table of every SNP
+pair, and applies a selectable test statistic on CPU or GPU.
 
-The starting point is a legacy CUDA prototype for pairwise SNP screening in
-binary case/control data. The repository now includes a Windows x64 Makefile
-build and a PLINK BED/BIM/FAM input adapter, but remains a research baseline,
-not a validated analysis pipeline. Known correctness issues below must be
-resolved before interpreting its output scientifically. No CPU-only executable,
-automated tests, or sample dataset is included.
+> **Status: research baseline (v0.2.1, work in progress).** The scan engine is
+> exact and tested for coverage and CPU/GPU agreement, but the *statistics* are
+> not yet calibrated interaction tests. Do not interpret the output
+> scientifically before reading [Known limitations](#known-limitations).
+> Direction and open work are tracked in [PLAN.md](PLAN.md).
 
-## Recent Updates
+Formerly `cudaepi`. The `epiload` repository provides the PLINK reader bridge
+(`bed-reader-cpp`).
 
-- **Refactored statistical methods** (Nov 2026): Epistatic tests extracted into
-  `include/epi_stats.h` as struct-based functors enabling compile-time test
-  selection. New `FastEpistasis2` screening statistic with improved variance
-  estimation. `FastThenChi2` pipeline for two-stage filtering.
-- **Data tile scanner design**: Memory-efficient partitioning strategy with
-  deterministic GPU memory usage, enabling processing of large datasets. Tiles
-  are processed sequentially with output headers repeated per tile.
-- **Makefile build stability** (Nov 2026): Fixed header dependency tracking to
-  include `epi_stats.h` in compilation triggers, resolving stale object issues.
+---
 
-## Repository Layout
+## Contents
 
-| File | Role |
+- [Features](#features)
+- [Repository layout](#repository-layout)
+- [Build](#build)
+- [Usage](#usage)
+- [Output format](#output-format)
+- [Input contract](#input-contract)
+- [Methods](#methods)
+- [Architecture](#architecture)
+- [Testing](#testing)
+- [Known limitations](#known-limitations)
+- [Roadmap and contributing](#roadmap-and-contributing)
+- [References](#references)
+- [License](#license)
+
+## Features
+
+- PLINK BED/BIM/FAM input; unknown phenotypes are dropped, missing genotypes are
+  excluded per pair.
+- Exhaustive pair coverage through chunked tiling (`GS` SNPs per chunk, padded so
+  coverage is exact for any SNP count).
+- **One implementation of the per-pair logic** (`test_cell<Test>()`), compiled
+  for host and device, so the CPU and GPU back ends give the same hits.
+- Statistics are small functors (`epi_stats.h`) selected by name at run time and
+  instantiated per back end at compile time.
+- GPU hit buffer overflow is detected and reported as an error (no silent loss).
+- Arithmetic is `double` by default (`-DEPI_REAL_FLOAT` selects `float`).
+
+## Repository layout
+
+| Path | Role |
 | --- | --- |
-| [include/epi_stats.h](include/epi_stats.h) | Epistatic test suite: `FastEpistasis`, `FastEpistasis2`, `Chi2Absolute`, and `FastThenChi2` pipeline; host-only test dispatcher `with_test()` |
-| [src/epi.cu](src/epi.cu) | GPU contingency tables, screening statistics, pair scanning, and CUDA lifecycle |
-| [include/epi.h](include/epi.h) | Thresholds, result structures, genotype type, and host-facing CUDA declarations |
-| [src/main.cpp](src/main.cpp) | BED dataset loading, data tile scheduling, GPU orchestration, and tab-separated output |
-| [include/bed_dataset.h](include/bed_dataset.h) | PLINK BED/BIM/FAM adapter and single-SNP score calculation |
-| [include/cutil_compat.h](include/cutil_compat.h) | Minimal replacements for the removed CUDA CUTIL helpers |
-| [Makefile](Makefile), [deps.yaml](deps.yaml) | Windows x64 build targets and the Rust BED-reader bridge dependency |
-| [src/cuPrintf.cu](src/cuPrintf.cu), [src/cuPrintf.cuh](src/cuPrintf.cuh) | Bundled device-printing helper, not used by the active scan |
+| `include/epi_core.h` | Core types: `real`, `Hit`, `TestOut`, `TileView`, `SnpSource`, `ScanConfig` |
+| `include/epi_stats.h` | Test functors (`FastEpistasis`, `FastEpistasis2`, `Chi2Absolute`, `FastThenChi2`) and the `with_test()` dispatcher |
+| `include/epi_cell.h` | `test_cell<Test>()`: builds one pair's table and applies the test and hit filters (shared by CPU and GPU) |
+| `include/epi_scanner.h` | `ScanContext`, `Tile`, `TileScanner` interface, `run_scan()`, and the `brute_force()` reference scan |
+| `include/epi_cpu.h` | `CpuTileScanner` (single-threaded) |
+| `include/epi_gpu.cuh`, `src/epi_gpu.cu` | `GpuTileScanner` (one CUDA thread per SNP pair) |
+| `include/bed_dataset.h` | `BedDataset`: PLINK adapter over `bed-reader-cpp`, plus single-SNP scores |
+| `src/main.cpp` | Command-line driver |
+| `src/test_epi.cpp` | Test program (built as `epitest.exe`) |
+| `scripts/fetch_deps.py`, `deps.yaml` | Dependency fetcher and manifest |
+| `data/` | Small PLINK fixtures and reference outputs (`all.*`: 5,000 SNPs × 500 samples; `testepi.*`: 2 SNPs × 6 samples) |
+| `Makefile` | Windows x64 build (see below) |
+| `Release` | Version string |
 
-The Makefile builds `epi.exe` or `build/debug/epi.exe`; existing binaries and
-PDBs are build artifacts, not evidence that the current source passes tests.
+## Build
 
-## Current Method
+Current build target: **Windows x64** with GNU Make, MSVC C++ Build Tools, CUDA
+Toolkit 12.x (`nvcc`), and Python 3.12+ (for the dependency fetcher). Linux and
+CPU-only builds are not supported yet (see [PLAN.md](PLAN.md), milestone M0).
 
-### Data Tile Scanner Design
-
-The dataset is partitioned into memory-efficient **tiles** using a hard-coded
-500,000,000-byte genotype-memory budget. This tile-based architecture enables:
-- **Within-tile scanning**: Complete SNP-pair enumeration within each tile
-- **Between-tile scanning**: Exhaustive cross-tile pair coverage (all pairs from
-  chunk *i* × chunk *j* where i ≤ j)
-- **Deterministic memory management**: Predictable GPU memory usage regardless
-  of dataset size, allowing processing of very large genetic cohorts
-
-For each tile, one CUDA thread is assigned per SNP pair. The scheduler computes
-grid and block dimensions to cover the tile-local pair matrix. Tiles are
-processed sequentially; output from each tile (tagged with tile-local `EdgeName`)
-is appended to the results file with repeated headers.
-
-### Epistatic Test Suite
-
-The refactored statistical methods are defined in `include/epi_stats.h` as
-struct-based functors, each implementing:
-
-```cpp
-static EPI_HD TestOut run(const real CT[2][3][3], const real N[3], 
-                          const TestOptions&);
-```
-
-This design enables:
-- **Compile-time polymorphism**: Tests are instantiated per back end (host/device)
-- **Code reuse**: Same implementation runs on CPU and GPU via `EPI_HD` macro
-- **Easy extensibility**: New tests are added by writing a struct and one line
-  to the dispatcher
-
-#### Available Tests
-
-- **`FastEpistasis`**: Allele-pair log-odds-ratio z score (Purcell 2007 / BOOST
-  style). Collapses the 3×3 genotype table to 2×2 allele-pair counts, then
-  returns `|log OR_aff - log OR_unaff| / SE`. Returns 0 if any of the 8
-  allele-count cells is empty.
-
-- **`FastEpistasis2`**: Refined screening statistic using allele-pair
-  stratification with separate variance estimation per phenotype group.
-  Computes independent odds ratios and variances for cases and controls,
-  then returns `|log OR_case - log OR_control| / sqrt(var_case + var_control)`.
-  More robust to unbalanced allele distributions.
-
-- **`Chi2Absolute`**: Pearson chi-square test for each joint-genotype cell
-  against all remaining cells (2×2: cell vs. rest, cases vs. controls).
-  Reports the cell with the largest chi-square; ties keep the first cell in
-  row-major order. Only cells with nonzero counts in both phenotype groups
-  are evaluated.
-
-- **`FastThenChi2`**: Two-stage pipeline using `FastEpistasis2` as a screen
-  (default: `|z| ≥ 0.01`), then running `Chi2Absolute` on pairs that pass.
-  Reduces computational load by pre-filtering weak candidates.
-
-The active test is selected at compile time via the `with_test()` dispatcher.
-
-1. Read genotypes from a PLINK `.bed` file and SNP/sample metadata from matching
-  `.bim` and `.fam` files. Single-SNP comparison scores are computed by the
-  `BedDataset` adapter rather than loaded from an external reader.
-2. Partition the SNP matrix using a hard-coded 500,000,000-byte genotype-memory
-   budget. Scan within tiles and between pairs of tiles.
-3. Assign one CUDA thread to each scheduled SNP pair. Build a `2 x 3 x 3`
-   contingency table indexed by phenotype and the two genotype codes. Exclude
-   samples missing either genotype and adjust case/control totals for that pair.
-4. Compute the selected screening statistic (by default `FastEpistasis2`), 
-   comparing phenotype-stratified odds ratios or other measures across cases 
-   and controls.
-5. For pairs passing the screen, test each of the nine joint-genotype cells
-   against all other joint genotypes in a case/control 2x2 table. With `A` and
-   `B` the case/control counts in the selected cell and `C` and `D` the remaining
-   case/control counts, compute:
-
-   ```text
-   N  = A + B + C + D
-   X2 = N * (A*D - B*C)^2 / ((A+C)*(A+B)*(C+D)*(B+D))
-   OR = (A*D) / (B*C)
-   ```
-
-   Only tables with all four counts strictly positive are evaluated. There is
-   no continuity correction or exact test for sparse tables.
-6. Retain a pair if a cell exceeds `CHI10E9` (currently 25) and the retained
-   statistic exceeds both supplied single-SNP scores. The current code keeps
-   the last qualifying cell in traversal order, not the strongest cell.
-
-### Statistical Interpretation
-
-The cell test detects joint-genotype association with phenotype. Comparing its
-statistic with single-SNP scores does not establish interaction beyond main
-effects; the adapter computes each single-SNP score as the maximum genotype-cell
-chi-square statistic.
-A formal interaction model, null hypothesis, calibration, and validation are
-still needed before claiming detection of epistasis.
-
-Despite its name, `CHI10E9` is a statistic cutoff of 25, approximately a
-5.7e-7 upper-tail probability under a one-degree-of-freedom chi-square reference.
-It is not a study-wide significance guarantee. The code applies no explicit
-multiple-testing correction across SNP pairs or the nine cell comparisons and
-does not check expected-count adequacy. Population structure, relatedness, and
-other covariates are not modeled.
-
-## Input Contract
-
-- Genotypes are stored SNP-major: `M[snp * nSamples + sample]`.
-- Valid genotype codes are `0`, `1`, and `2`; negative values indicate missing
-  genotypes. Allele orientation must be consistent with the dataset reader.
-- The adapter maps PLINK FAM phenotype `1` to `0` (control) and `2` to `1`
-  (case). Other phenotype values become missing, which the kernel does not
-  handle safely; use datasets containing only `1` and `2` phenotypes.
-- `TF` is plain `char`; missing-value handling requires signed-char behavior
-  so BED missing genotypes remain negative in the kernel.
-- The adapter computes each SNP's univariate score from its genotype counts.
-
-Pass the PLINK `.bed` path; matching same-basename `.bim` and `.fam` files must
-be in the same directory. Genotypes are read by the Rust-backed
-`bed-reader-cpp` bridge.
-
-## Build Status
-
-The current Makefile targets Windows x64 with GNU Make, MSVC C++ Build Tools,
-and CUDA Toolkit 12.x (`nvcc` and the CUDA runtime). It uses C++17 and defaults
-`CUDA_ARCH` to `native`, compiling for the GPU architecture detected by NVCC.
-`CUDA_PATH` must point to the selected Toolkit installation for linking.
-The old CUTIL dependency has been replaced by `include/cutil_compat.h`. The
-Makefile fetches the Rust-backed `bed-reader-cpp` 0.1.0 release declared in
-`deps.yaml`; Python 3.12+ and PyYAML are used by the dependency fetcher.
-
-From the project directory, set up the dependency fetcher and build the
-executable:
+`CUDA_PATH` must point to the Toolkit installation.
 
 ```text
-make setup
-make doctor
-make
+make setup     # create .venv and install PyYAML
+make doctor    # check Python / Make / PyYAML
+make           # fetch deps, then build epi.exe and epitest.exe
+make debug     # build/debug/epi.exe and build/debug/epitest.exe
+make clean     # remove build outputs
+make deps-force  # re-fetch dependencies
 ```
 
-`make` fetches dependencies and builds `epi.exe`. To build the debug executable,
-run `make debug` after dependencies are available; it writes
-`build/debug/epi.exe`. Set `CUDA_ARCH` on the Make command line to override the
-default architecture, for example `make CUDA_ARCH=sm_XX`. This Makefile does not
-provide a Linux, cross-platform, or CPU-only build.
+`CUDA_ARCH` defaults to `native`; override with `make CUDA_ARCH=sm_XX`.
+The `bed-reader-cpp` 0.1.0 Windows x64 release declared in `deps.yaml` is
+downloaded to `3rdparty/` and verified by SHA-256. Even `--device cpu` currently
+links the CUDA object, so the CUDA Toolkit is required to build.
 
-## Invocation And Output
-
-With the required build tools installed and a PLINK dataset available:
+## Usage
 
 ```powershell
-.\epi.exe --files "C:\data\study.bed" --noprompt
+.\epi.exe --files "C:\data\study.bed" --methods fast chi2 --device gpu --verbose --noprompt
 ```
 
-`--files` accepts one or more BED paths. Each BED file must have matching BIM
-and FAM siblings. The program appends tab-separated results to
-`<input filename>.cc.log`; it waits for Enter before exiting unless
-`--noprompt` is supplied. Headers are repeated for each tile, and `EdgeName`
-numbering restarts for each tile.
-
-| Output | Meaning |
+| Option | Meaning |
 | --- | --- |
-| `EdgeName` | Tile-local generated result label |
-| `CHR1`, `SNP1`, `CHR2`, `SNP2` | Reader-provided chromosome and SNP identifiers |
-| `X2 STAT` | Retained joint-genotype cell's Pearson statistic |
-| `fast-epi P` | Misnamed screening field: assigned a z statistic, currently always zero |
-| `OR` | Selected cell's case/control odds ratio; not a relative risk |
-| `Source`, `Target` | Zero-based SNP indices mapped back to the input dataset |
+| `--files a.bed [b.bed ...]` | One or more BED files (matching `.bim`/`.fam` required in the same directory) |
+| `--methods m1 [m2 ...]` | Tests to run, default `fast` (see table below) |
+| `--device cpu\|gpu` | Back end, default `cpu` |
+| `--verbose` | Also print the number of SNP pairs tested |
+| `--noprompt` | Do not wait for Enter before exiting |
 
-The selected genotype cell itself is not recorded. Output ordering is not
-deterministic because GPU threads reserve result slots atomically. The result
-handling defects below mean even apparently populated rows are not trustworthy.
+| Method name | Test |
+| --- | --- |
+| `fast` | alias of `fastepistasis+Chi2` |
+| `fastepistasis` | `FastEpistasis` |
+| `chi2` | `Chi2Absolute` |
+| `fastepistasis+Chi2` | `FastThenChi2` |
 
-## Initial Code Review
+Fixed in code for now (no command-line option yet): `GS = 1024` SNPs per chunk,
+`min_stat = 0`, screening threshold `3.0`, excluded chromosomes `6` and `23`,
+tile memory budget 500 MB, GPU block side 16, GPU hit capacity 2²² per tile.
 
-These are source-review findings, not fixes. The documentation changes preserve
-the executable behavior.
+## Output format
 
-### Critical: Result Integrity And Input Safety
+Results are **appended** to `<input path>.cc.log` (tab-separated). A header line
+is written before each method's block, so a file holds one header per run and
+method.
 
-- **Uninitialized results:** `kernelLaunch` allocates `d_R` without initializing
-  it, then copies the entire buffer back. Host-side initialization is not copied
-  to the device. `printout` scans all entries using only `stat > 0.0001`, so
-  unwritten slots can be mistaken for results and yield invalid metadata indices.
-- **Uninitialized excluded SNPs:** `main1` skips loading chromosomes `6` and
-  `23`, but still advances their matrix positions and schedules them for testing.
-  Both genotype and single-SNP-score slots remain uninitialized. Invalid
-  genotype values can also index outside the contingency table.
-- **Unchecked phenotype/genotype codes:** `VecEpi` directly indexes `CT` and
-  `NA` using input values. Missing or invalid phenotypes, or positive genotype
-  codes above 2, can cause out-of-bounds device accesses.
+| Column | Meaning |
+| --- | --- |
+| `Test` | Method name used |
+| `EdgeName` | `R<i>`, index of the hit within this block |
+| `CHR1`, `SNP1`, `CHR2`, `SNP2` | Chromosome and SNP identifiers from the `.bim` |
+| `STAT` | Test statistic of the reported pair |
+| `OR` | Odds ratio of the reported cell (`Chi2Absolute`, `FastThenChi2`); `0` for `FastEpistasis` |
+| `Source`, `Target` | Zero-based SNP indices in the input dataset |
 
-### High: Screening And Pair Coverage
+Hits are sorted by `(Source, Target)`, so output is deterministic. The selected
+genotype cell is computed internally (`Hit.row`, `Hit.col`) but not yet written
+out.
 
-- **Disabled first-stage screen:** `fastepi` declares a second `z` inside the
-  positive-count branch. The returned outer `z` is always zero. Simply removing
-  the shadowing is insufficient: `VecEpi` uses `z < P_Epi`, where `P_Epi = 0.01`
-  is a p-value-style cutoff. Define z-score versus p-value semantics and sparse
-  count behavior together before fixing this stage.
-- **Incomplete or incorrect pair scheduling:** grid dimensions use integer
-  division by 16, dropping partial blocks and potentially launching zero-sized
-  grids. The diagonal mapping assumes an even SNP count; cross-chunk mapping
-  assumes two equally sized halves, although the final chunk can be shorter.
-  Ceiling division alone is insufficient without bounds checks and explicit
-  chunk lengths. Tiny datasets can also make `matrixPartition` divide by zero
-  when the computed half-chunk length is zero.
-- **Wrapping result reservation:** `atomicInc(ResIndex, NumRes)` wraps rather
-  than reporting overflow. Slot zero is skipped, then earlier results can be
-  overwritten. The host receives neither a valid result count nor an overflow
-  flag. The allocation has 10,001 entries, with 10,000 intended result slots.
+## Input contract
 
-### Other Correctness And Validation Gaps
+- Genotypes are the allele count `0`, `1`, `2` as returned by `bed-reader`;
+  missing is `-1`. Any other value aborts the scan.
+- PLINK phenotype `2` = case, `1` = control. Any other phenotype (including
+  `0`/`-9`) marks the sample as unknown and it is not used.
+- The whole genotype matrix is loaded in memory by `BedDataset`.
 
-- `ctEpiAbs` overwrites the result for every passing cell, so a weaker later
-  cell can mask a stronger cell and change the single-SNP comparison outcome.
-  The inactive CPU version repeats this behavior and is not an independent oracle.
-- `ctEpiRel`, if enabled, uses the whole pair's sample total in place of the
-  four selected cells' total, inflating the restricted comparison's statistic.
-- `NTest` starts at one and wraps at 10,000 via `atomicInc`; it is not an accurate
-  count of tested pairs. Its allocation is not explicitly freed in `CudaCleanup`,
-  although the subsequent legacy context teardown releases device resources.
-- Sparse/degenerate tables have no explicit result status, and float arithmetic
-  can lose count precision or overflow intermediate products on large cohorts.
-- No automated correctness, CPU/GPU agreement, pair-coverage, or calibration
-  tests are included. Historical build logs do not substitute for these checks.
+## Methods
 
-## Development Priorities
+Notation: `CT[g][a][b]` is the number of samples in group `g` (case/control)
+with genotype `a` at SNP 1 and `b` at SNP 2. `N[g]` counts samples with both
+genotypes known.
 
-1. Specify the interaction null hypothesis, genotype/phenotype encoding,
-   screening statistic, missing-data policy, and multiple-testing strategy.
-2. Establish small deterministic C++ reference tests for contingency tables,
-   known statistics, null effects, main effects only, and simulated interactions.
-3. Correct input validation, pair scheduling, result initialization, capacity
-   handling, and screening semantics; check CPU/GPU agreement and exact pair
-   coverage on odd, small, non-block-aligned, and unequal chunk sizes.
-4. Introduce a reproducible modern C++ build with optional CUDA support and
-   self-contained fixtures before optimizing throughput.
-5. Evaluate calibration, power, and performance on documented simulations and
-   appropriately controlled genetic datasets.
+- **`FastEpistasis`** — collapses each group's 3×3 table to a 2×2 allele-pair
+  table (cells `Σ n·(2−a)(2−b)`, `Σ n·(2−a)·b`, `Σ n·a·(2−b)`, `Σ n·a·b`),
+  then `z = |log OR_case − log OR_control| / sqrt(Σ 1/cell)`. The reported
+  statistic is **z²**. Returns 0 if any of the 8 cells is empty.
+- **`FastEpistasis2`** — same idea with the allele-pair cells built as
+  `4·n00 + 2·n01 + 2·n10 + n11` (and analogues), and separate variances for
+  cases and controls. Reported statistic is **z²**. It is used inside
+  `FastThenChi2` but cannot yet be selected on its own.
+- **`Chi2Absolute`** — Pearson χ² (1 df, no continuity correction) of each of
+  the nine joint-genotype cells against all other cells, cases vs controls. Only
+  cells with all four counts positive are tested. Reports the cell with the
+  largest χ² (ties: first in row-major order) and its odds ratio.
+- **`FastThenChi2`** — runs `FastEpistasis2` and, if its statistic is
+  `≥ screen_min`, runs `Chi2Absolute`.
+
+**Hit criterion.** A pair is reported when its statistic exceeds `min_stat` and
+exceeds the single-SNP score of both SNPs. The single-SNP score is the largest
+1-df χ² of a genotype class against the other two, computed in `BedDataset`.
+
+## Architecture
+
+```text
+SnpSource (BedDataset) ──► make_context() ──► run_scan()
+                                                │  chunks of GS SNPs, pairs a ≤ b
+                                                ▼
+                                      TileScanner::scan(tile)
+                              ┌─────────────────┴───────────────┐
+                    CpuTileScanner (loop)              GpuTileScanner (1 thread / pair)
+                              └─────────────────┬───────────────┘
+                                      test_cell<Test>()   (epi_cell.h)
+                                                │
+                                      Test::run(CT, N, opt)   (epi_stats.h)
+```
+
+A tile holds two chunks of `GS` SNPs. For a diagonal tile (chunk with itself)
+only `c > r` is tested. Padding and excluded SNPs carry `valid = 0` and are
+skipped. Adding a statistic means writing a struct with
+`static EPI_HD TestOut run(const real CT[2][3][3], const real N[3], const TestOptions&)`
+and adding one line to `with_test()`.
+
+## Testing
+
+`make` also builds `epitest.exe` (from `src/test_epi.cpp`); run it from the
+repository root. It covers:
+
+- statistics against independent references,
+- the CPU scan against a brute-force scan without tiling (same hits, same number
+  of tests, planted interaction recovered),
+- the GPU scan against the CPU scan,
+- error handling (unknown test, invalid genotype, tile over budget, GPU overflow,
+  `GS` not a multiple of the block side).
+
+Known test state at `f038f33` (checked with a CPU emulation of the CUDA calls):
+the scan, GPU-vs-CPU and error-handling tests pass; **all `FastEpistasis`
+statistic checks fail** because the test expects |z| while the function returns
+z² (see [PLAN.md](PLAN.md), F-03). There is no continuous integration and no
+test has been calibrated against a null distribution yet.
+
+## Known limitations
+
+These are the findings that matter for interpreting results; the full list with
+identifiers is in [PLAN.md](PLAN.md).
+
+1. **The default output is not a significance filter.** `min_stat` is 0 and there
+   is no command-line option for it. On a phenotype-permuted null dataset
+   (first 1,500 SNPs of `data/all.bed`, 1.12 M pairs, `Chi2`) 65 % of pairs were
+   reported at `min_stat = 0`, versus one pair at `min_stat = 25`.
+2. **The statistics are not interaction tests.** `Chi2Absolute` tests a single
+   genotype cell against the rest, i.e. joint-genotype association, and the
+   "beats both single-SNP scores" rule is a heuristic, not a hypothesis test. The
+   maximum over nine cells is compared with a maximum over three, with no
+   p-values, no degrees-of-freedom accounting, and no multiple-testing control.
+3. **Statistic semantics are inconsistent.** Fast statistics are z², the
+   `screen_min` default is 3.0 in code, and different documents have called it a
+   z score, a p-value, or a χ² threshold.
+4. **Allele-based fast statistics may be mis-calibrated.** They follow the PLINK
+   fast-epistasis approach, whose formulas were reported to contain minor
+   errors by Ueki & Cordell (2012).
+5. **No covariates or structure.** Population stratification, relatedness and
+   LD between the two SNPs are not modelled; there is no LD or distance filter.
+6. **Sparse tables.** There is no expected-count check, no continuity
+   correction and no exact test.
+7. **Scale.** Genotypes are held fully in memory (and temporarily as floats),
+   hits are accumulated in memory, and GPU kernels read unpacked 1-byte
+   genotypes per sample.
+8. **Platform.** Windows x64 only; building requires CUDA even for the CPU
+   back end.
+
+## Roadmap and contributing
+
+[PLAN.md](PLAN.md) is the living plan: milestones, algorithm specifications
+(BOOST/GBOOST, case-only and case-control contrasts, Ueki–Cordell, MDR, MB-MDR),
+decision log and change log. Update it in the same commit as the change it
+describes, and keep this README limited to what the code does *now*.
+
+## References
+
+- Purcell S et al. (2007) PLINK. *Am J Hum Genet* 81:559–575.
+- Piegorsch WW et al. (1994) Non-hierarchical logistic models and case-only
+  designs. *Stat Med* 13:153–162.
+- Wu X et al. (2010) A novel statistic for genome-wide interaction analysis.
+  *PLoS Genet* 6(9):e1001131.
+- Wan X et al. (2010) BOOST. *Am J Hum Genet* 87:325–340.
+- Ueki M, Cordell HJ (2012) Improved statistics for genome-wide interaction
+  analysis. *PLoS Genet* 8(4):e1002625.
+- Cordell HJ (2009) Detecting gene–gene interactions that underlie human
+  diseases. *Nat Rev Genet* 10:392–404.
+
+## License
+
+Apache License 2.0, see [LICENSE](LICENSE).
